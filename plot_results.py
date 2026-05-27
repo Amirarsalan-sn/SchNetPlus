@@ -8,8 +8,17 @@ OUT_DIR = "./output/mlff_project/figures"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 
-def load_history(model_name):
-    path = os.path.join(RUNS_DIR, model_name, "history.json")
+def config_dirs():
+    out = []
+    for name in os.listdir(RUNS_DIR):
+        path = os.path.join(RUNS_DIR, name)
+        if os.path.isdir(path) and name.startswith("lr_"):
+            out.append(name)
+    return sorted(out)
+
+
+def load_history(config_name, model_name):
+    path = os.path.join(RUNS_DIR, config_name, model_name, "history.json")
     with open(path, "r") as f:
         return json.load(f)
 
@@ -20,69 +29,92 @@ def curve_df(hist, split):
     return df
 
 
-def plot_loss_histories(histories):
+def plot_histories_per_config(config_name, histories):
     plt.figure(figsize=(10, 6))
     for hist in histories:
-        df = curve_df(hist, "train")
-        plt.plot(df["epoch"], df["loss"], label=f"{hist['model']} train")
+        dft = curve_df(hist, "train")
         dfv = curve_df(hist, "val")
+        plt.plot(dft["epoch"], dft["loss"], label=f"{hist['model']} train")
         plt.plot(dfv["epoch"], dfv["loss"], linestyle="--", label=f"{hist['model']} val")
     plt.xlabel("Epoch")
-    plt.ylabel("Total loss")
-    plt.title("Training and validation loss histories")
+    plt.ylabel("Loss")
+    plt.title(f"Train/val loss histories - {config_name}")
     plt.legend()
     plt.tight_layout()
-    plt.savefig(os.path.join(OUT_DIR, "loss_histories.png"), dpi=200)
+    plt.savefig(os.path.join(OUT_DIR, f"{config_name}_loss_histories.png"), dpi=200)
     plt.close()
 
-
-def plot_force_histories(histories):
     plt.figure(figsize=(10, 6))
     for hist in histories:
-        df = curve_df(hist, "val")
-        plt.plot(df["epoch"], df["force_mae"], label=f"{hist['model']} val force MAE")
+        dfv = curve_df(hist, "val")
+        plt.plot(dfv["epoch"], dfv["force_mae"], label=f"{hist['model']} val force MAE")
     plt.xlabel("Epoch")
     plt.ylabel("Force MAE")
-    plt.title("Validation force MAE across models")
+    plt.title(f"Validation force MAE - {config_name}")
     plt.legend()
     plt.tight_layout()
-    plt.savefig(os.path.join(OUT_DIR, "force_mae_histories.png"), dpi=200)
+    plt.savefig(os.path.join(OUT_DIR, f"{config_name}_val_force_mae.png"), dpi=200)
     plt.close()
 
 
-def plot_param_bar(histories):
+def plot_test_metrics_per_config(config_name, histories):
     names = [h["model"] for h in histories]
+    test_loss = [h["test"]["loss"] for h in histories]
+    test_force = [h["test"]["force_mae"] for h in histories]
+    test_energy = [h["test"]["energy_mae"] for h in histories]
     params = [h["num_parameters"] for h in histories]
-    plt.figure(figsize=(8, 5))
-    plt.bar(names, params)
-    plt.ylabel("Trainable parameters")
-    plt.title("Model parameter counts")
-    plt.tight_layout()
-    plt.savefig(os.path.join(OUT_DIR, "parameter_counts.png"), dpi=200)
-    plt.close()
 
-
-def plot_test_bar(histories):
-    names = [h["model"] for h in histories]
-    force_mae = [h["test"]["force_mae"] for h in histories]
-    energy_mae = [h["test"]["energy_mae"] for h in histories]
-
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    axes[0].bar(names, force_mae)
-    axes[0].set_title("Test force MAE")
-    axes[1].bar(names, energy_mae)
-    axes[1].set_title("Test energy MAE")
+    fig, axes = plt.subplots(1, 4, figsize=(18, 5))
+    axes[0].bar(names, test_loss)
+    axes[0].set_title("Test total loss")
+    axes[1].bar(names, test_force)
+    axes[1].set_title("Test force MAE")
+    axes[2].bar(names, test_energy)
+    axes[2].set_title("Test energy MAE")
+    axes[3].bar(names, params)
+    axes[3].set_title("Parameters")
     for ax in axes:
-        ax.tick_params(axis='x', rotation=15)
+        ax.tick_params(axis='x', rotation=20)
+    plt.suptitle(config_name)
     plt.tight_layout()
-    plt.savefig(os.path.join(OUT_DIR, "test_metrics.png"), dpi=200)
+    plt.savefig(os.path.join(OUT_DIR, f"{config_name}_test_metrics.png"), dpi=200)
     plt.close()
+
+
+def plot_cross_config_summary(all_histories):
+    rows = []
+    for config_name, histories in all_histories.items():
+        for hist in histories:
+            rows.append({
+                "config": config_name,
+                "model": hist["model"],
+                "test_loss": hist["test"]["loss"],
+                "test_force_mae": hist["test"]["force_mae"],
+                "test_energy_mae": hist["test"]["energy_mae"],
+                "params": hist["num_parameters"],
+            })
+    df = pd.DataFrame(rows)
+    df.to_csv(os.path.join(OUT_DIR, "all_test_metrics.csv"), index=False)
+
+    for metric in ["test_loss", "test_force_mae", "test_energy_mae"]:
+        pivot = df.pivot(index="config", columns="model", values=metric)
+        pivot.plot(kind="bar", figsize=(10, 6))
+        plt.title(metric.replace('_', ' ').title())
+        plt.ylabel(metric)
+        plt.tight_layout()
+        plt.savefig(os.path.join(OUT_DIR, f"cross_config_{metric}.png"), dpi=200)
+        plt.close()
+
+
+def main():
+    all_histories = {}
+    for cfg_name in config_dirs():
+        histories = [load_history(cfg_name, m) for m in ["schnet", "schnet_plus", "schnet_plusplus"]]
+        all_histories[cfg_name] = histories
+        plot_histories_per_config(cfg_name, histories)
+        plot_test_metrics_per_config(cfg_name, histories)
+    plot_cross_config_summary(all_histories)
 
 
 if __name__ == "__main__":
-    model_names = ["schnet", "schnet_plus", "schnet_plusplus"]
-    histories = [load_history(m) for m in model_names]
-    plot_loss_histories(histories)
-    plot_force_histories(histories)
-    plot_param_bar(histories)
-    plot_test_bar(histories)
+    main()

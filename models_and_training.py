@@ -2,7 +2,8 @@ import os
 import json
 import math
 import random
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, replace
+from itertools import product
 from typing import Dict, List, Tuple, Optional
 
 import torch
@@ -49,39 +50,49 @@ class TrainConfig:
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     seed: int = 42
     save_dir: str = "./output/mlff_project/runs"
+    split_id: str = "default_split"
+
+
+@dataclass
+class ExperimentGrid:
+    learning_rates: Tuple[float, float] = (1e-4, 5e-4)
+    weight_decays: Tuple[float, float] = (1e-4, 1e-2)
 
 
 # =========================
 # Dataset
 # =========================
 
-def load_rmd17_splits(cfg: TrainConfig):
-    # PyG MD17 docs expose revised datasets via revised=True in recent versions.
+def load_dataset(cfg: TrainConfig):
     try:
         dataset = MD17(root=cfg.root, name=cfg.molecule, revised=(cfg.dataset_variant == "revised"))
     except TypeError:
         dataset = MD17(root=cfg.root, name=cfg.molecule)
+    return dataset
 
-    n = len(dataset)
+
+def make_split_indices(n: int, cfg: TrainConfig):
     required = cfg.train_size + cfg.val_size + cfg.test_size
     if required > n:
         raise ValueError(f"Requested {required} samples but dataset has only {n}.")
-
     g = torch.Generator().manual_seed(cfg.seed)
     perm = torch.randperm(n, generator=g).tolist()
+    return {
+        "train": perm[: cfg.train_size],
+        "val": perm[cfg.train_size: cfg.train_size + cfg.val_size],
+        "test": perm[cfg.train_size + cfg.val_size: required],
+    }
 
-    train_idx = perm[: cfg.train_size]
-    val_idx = perm[cfg.train_size : cfg.train_size + cfg.val_size]
-    test_idx = perm[cfg.train_size + cfg.val_size : required]
 
-    train_set = Subset(dataset, train_idx)
-    val_set = Subset(dataset, val_idx)
-    test_set = Subset(dataset, test_idx)
-
-    train_loader = DataLoader(train_set, batch_size=cfg.batch_size, shuffle=True)
-    val_loader = DataLoader(val_set, batch_size=cfg.batch_size, shuffle=False)
-    test_loader = DataLoader(test_set, batch_size=cfg.batch_size, shuffle=False)
-    return dataset, train_loader, val_loader, test_loader
+def build_loaders(dataset, split_indices: Dict[str, List[int]], batch_size: int):
+    train_set = Subset(dataset, split_indices["train"])
+    val_set = Subset(dataset, split_indices["val"])
+    test_set = Subset(dataset, split_indices["test"])
+    return (
+        DataLoader(train_set, batch_size=batch_size, shuffle=True),
+        DataLoader(val_set, batch_size=batch_size, shuffle=False),
+        DataLoader(test_set, batch_size=batch_size, shuffle=False),
+    )
 
 
 # =========================
@@ -324,22 +335,30 @@ def run_epoch(model, loader, cfg: TrainConfig, optimizer=None):
     return metrics
 
 
-def train_model(model_name: str, model_cls, cfg: TrainConfig):
+def train_model(model_name: str, model_cls, cfg: TrainConfig, split_indices: Dict[str, List[int]]):
     set_seed(cfg.seed)
-    os.makedirs(cfg.save_dir, exist_ok=True)
-    _, train_loader, val_loader, test_loader = load_rmd17_splits(cfg)
+    dataset = load_dataset(cfg)
+    train_loader, val_loader, test_loader = build_loaders(dataset, split_indices, cfg.batch_size)
+
     model = model_cls(cfg).to(cfg.device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+
+    config_name = f"lr_{cfg.lr}_wd_{cfg.weight_decay}".replace(".", "p")
+    run_dir = os.path.join(cfg.save_dir, config_name, model_name)
+    os.makedirs(run_dir, exist_ok=True)
 
     history = {
         "model": model_name,
         "config": asdict(cfg),
+        "split_indices": split_indices,
         "num_parameters": count_parameters(model),
         "train": [],
         "val": [],
         "test": None,
         "best_val_loss": float("inf"),
         "best_epoch": -1,
+        "best_state_path": os.path.join(run_dir, "best_model.pt"),
+        "final_state_path": os.path.join(run_dir, "final_model.pt"),
     }
 
     best_state = None
@@ -355,22 +374,23 @@ def train_model(model_name: str, model_cls, cfg: TrainConfig):
             history["best_val_loss"] = val_metrics["loss"]
             history["best_epoch"] = epoch
             best_state = {k: v.cpu() for k, v in model.state_dict().items()}
+            torch.save(best_state, history["best_state_path"])
 
+        print(
+            f"[{config_name}]-[{model_name}]-[{history['num_parameters']}]: epoch #{epoch} - train_loss = {train_metrics['loss']} - val_loss = {val_metrics['loss']}")
+
+    torch.save(model.state_dict(), history["final_state_path"])
     if best_state is not None:
         model.load_state_dict(best_state)
     history["test"] = run_epoch(model, test_loader, cfg, optimizer=None)
+    print("===========================================================================================================")
+    print(
+        f"[{config_name}]-[{model_name}]-[{history['num_parameters']}]: finished training - test_loss = {history['test']}")
 
-    run_dir = os.path.join(cfg.save_dir, model_name)
-    os.makedirs(run_dir, exist_ok=True)
-    torch.save(model.state_dict(), os.path.join(run_dir, "final_model.pt"))
     with open(os.path.join(run_dir, "history.json"), "w") as f:
         json.dump(history, f, indent=2)
     return history
 
-
-# =========================
-# Value metric for accuracy vs params
-# =========================
 
 def efficiency_score(model_mae: float, baseline_mae: float, model_params: int, baseline_params: int):
     rel_error_improvement = (baseline_mae - model_mae) / max(baseline_mae, 1e-12)
@@ -379,26 +399,59 @@ def efficiency_score(model_mae: float, baseline_mae: float, model_params: int, b
 
 
 def summarize_against_baseline(baseline_hist: Dict, candidate_hist: Dict):
-    b_mae = baseline_hist["test"]["force_mae"]
-    c_mae = candidate_hist["test"]["force_mae"]
+    b_mae = baseline_hist["test"]["loss"]
+    c_mae = candidate_hist["test"]["loss"]
     b_p = baseline_hist["num_parameters"]
     c_p = candidate_hist["num_parameters"]
-    score = efficiency_score(c_mae, b_mae, c_p, b_p)
     return {
         "baseline_force_mae": b_mae,
         "candidate_force_mae": c_mae,
         "baseline_params": b_p,
         "candidate_params": c_p,
-        "relative_force_error_improvement": (b_mae - c_mae) / max(b_mae, 1e-12),
+        "relative_total_error_improvement": (b_mae - c_mae) / max(b_mae, 1e-12),
         "relative_param_increase": (c_p - b_p) / max(b_p, 1e-12),
-        "efficiency_score": score,
+        "efficiency_score": efficiency_score(c_mae, b_mae, c_p, b_p),
     }
+
+
+def run_experiment_grid(base_cfg: TrainConfig, grid: ExperimentGrid):
+    set_seed(base_cfg.seed)
+    dataset = load_dataset(base_cfg)
+    split_indices = make_split_indices(len(dataset), base_cfg)
+
+    model_specs = [
+        ("schnet", SchNetModel),
+        ("schnet_plus", SchNetPlusModel),
+        ("schnet_plusplus", SchNetPlusPlusModel),
+    ]
+
+    all_results = {}
+    for lr, wd in product(grid.learning_rates, grid.weight_decays):
+        cfg = replace(base_cfg, lr=lr, weight_decay=wd, split_id=f"seed_{base_cfg.seed}")
+        config_name = f"lr_{lr}_wd_{wd}".replace('.', 'p')
+        all_results[config_name] = {}
+        for model_name, model_cls in model_specs:
+            hist = train_model(model_name, model_cls, cfg, split_indices)
+            all_results[config_name][model_name] = hist
+
+        baseline = all_results[config_name]["schnet"]
+        comparisons = {}
+        for candidate in ["schnet_plus", "schnet_plusplus"]:
+            comparisons[candidate] = summarize_against_baseline(baseline, all_results[config_name][candidate])
+            print("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
+            print(
+                f"[{config_name}]-[{candidate}]-[{comparisons[candidate]['candidate_params']}]: efficiency score = {comparisons[candidate]['efficiency_score']}, relative total error improvement = {comparisons[candidate]['relative_total_error_improvement']}, relative param increase = {comparisons[candidate]['relative_param_increase']}")
+
+        with open(os.path.join(cfg.save_dir, config_name, "comparisons.json"), "w") as f:
+            json.dump(comparisons, f, indent=2)
+
+    with open(os.path.join(base_cfg.save_dir, "all_results_index.json"), "w") as f:
+        json.dump({k: list(v.keys()) for k, v in all_results.items()}, f, indent=2)
+    return all_results
 
 
 if __name__ == "__main__":
     cfg = TrainConfig()
-    print("This file defines models and training functions.")
-    print("Uncomment the calls below to run experiments.")
-    # h1 = train_model("schnet", SchNetModel, cfg)
-    # h2 = train_model("schnet_plus", SchNetPlusModel, cfg)
-    # h3 = train_model("schnet_plusplus", SchNetPlusPlusModel, cfg)
+    grid = ExperimentGrid()
+    print("Uncomment below to run the full grid.")
+    run_experiment_grid(cfg, grid)
