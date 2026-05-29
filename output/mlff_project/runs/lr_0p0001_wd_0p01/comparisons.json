@@ -1,0 +1,20 @@
+{
+  "schnet_plus": {
+    "baseline_force_mae": 13879.9189296875,
+    "candidate_force_mae": 890.7181020507812,
+    "baseline_params": 319745,
+    "candidate_params": 582401,
+    "relative_total_error_improvement": 0.9358268512544665,
+    "relative_param_increase": 0.8214545966316908,
+    "efficiency_score": 0.5137799498186978
+  },
+  "schnet_plusplus": {
+    "baseline_force_mae": 13879.9189296875,
+    "candidate_force_mae": 1376.673826171875,
+    "baseline_params": 319745,
+    "candidate_params": 451841,
+    "relative_total_error_improvement": 0.9008154274426392,
+    "relative_param_increase": 0.4131292123410843,
+    "efficiency_score": 0.6374614717293178
+  }
+}

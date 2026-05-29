@@ -1,0 +1,388 @@
+%% Don't modify these options.
+\documentclass[sigconf, nonacm]{acmart}
+\usepackage{float}
+%% The template already loads many useful packages,
+%% such as graphicx and booktabs.
+%% See https://www.acm.org/publications/proceedings-template
+
+\begin{document}
+
+\title{Machine Learning Force Fields: Predicting Potential Energy and Atomic Forces of Molecular Structures}
+
+\author{Amirarsalan Sanati}
+\email{amirarsalan.sanati.001@student.uni.lu}
+\affiliation{%
+  \institution{University of Luxembourg}
+  \country{Luxembourg}
+}
+
+\begin{abstract}
+	Molecular simulations are central to chemistry and materials science for probing mechanisms, designing drugs and materials, and accessing systems that are hard to study experimentally. Achieving quantum-chemical accuracy is, however, often prohibitively expensive because evaluating forces with first-principles electronic-structure methods dominates the cost. Machine-learning force fields mitigate this by learning the mapping from atomic structure to potential energy and forces from data. In this work we study how to make graph neural network (GNN) force fields more accurate without making them much larger. Building on SchNet, we propose a GNN that only changes how local atomic environments are aggregated, yielding two variants whose parameter counts increase by a constant factor of roughly 1.5-2×. Despite this modest growth, our models reduce test force and energy errors by factors of \textbf{3–10} on the rMD17 benchmark—about a \textbf{90\%} reduction in total loss compared to SchNet—and converge faster in terms of epochs. This shows that revisiting aggregation in GNNs can yield substantial practical gains for molecular simulation and make high-accuracy force fields more accessible.
+\end{abstract}
+
+\maketitle
+
+\section{Introduction}
+
+The goal of computational chemistry and materials science is to relate the \textit{jigglings and wigglings} of atoms to macroscopic behaviour \cite{MlffAlex, frank2022so3krates}. This is formalized by the \textbf{Potential Energy Surface (PES)}, a high-dimensional map from molecular geometries to potential energies \cite{MlffAlex}, which underlies \textbf{molecular dynamics (MD)} simulations of processes such as protein folding and chemical reactions \cite{CUI2025103191, Schtt2021EquivariantMP}.
+
+Classical approaches face a strong accuracy–cost trade-off \cite{frank2022so3krates}. \textit{Ab initio} methods like \textbf{Density Functional Theory (DFT)} are accurate but typically limited to systems of a few hundred atoms \cite{MlffAlex}, whereas \textit{molecular mechanics (MM)} scales to millions of atoms but often misses electronic effects like bond breaking, polarization, and charge transfer \cite{CUI2025103191, MlffAlex}. \textbf{Machine Learning Force Fields (MLFFs)} bridge this gap by fitting high-quality quantum data and recovering near-\textit{ab initio} accuracy at much lower cost \cite{CUI2025103191, MlffAlex, batatia2022mace}, enabling applications in drug discovery, battery design, and electrochemistry \cite{ElecChem, CUI2025103191}. 
+
+Here we ask how far one can push MLFF accuracy by modifying only the GNN architecture, without greatly increasing model size or runtime. We propose a SchNet-based GNN that changes how information from neighboring atoms is aggregated, yielding two variants whose parameter counts grow by only about 1.5–2× compared to the original model. On the rMD17 benchmark these architectures cut total test error by up to 90\%, corresponding to 3–10× lower energy and force mean absolute errors, and they converge faster, indicating that improved aggregation alone can substantially enhance the usefulness of MLFFs for molecular simulation.
+
+\section{Related Work}
+
+Early MLFFs used handcrafted geometric descriptors such as Atom-Centered Symmetry Functions and SOAP \cite{MlffAlex, batatia2022mace}, combined with kernel methods like GAP and sGDML \cite{MlffAlex, Chmiela2018, CHMIELA201938}. While sGDML is highly data-efficient for small molecules, its global descriptors do not scale well to large or extended systems \cite{MlffAlex}. 
+
+Graph Neural Networks (GNNs) model atoms as nodes and interactions as edges. SchNet introduced continuous-filter convolutions based on interatomic distances \cite{10.1063/1.5019779}, and DimeNet++ added directional message passing with bond angles to better capture non-equilibrium structures and reactions \cite{gasteiger2020dimenetpp}. Modern MLFFs are dominated by equivariant architectures that ensure forces and other tensors transform correctly under rotations: NequIP showed that $E(3)$-equivariant convolutions greatly improve data efficiency \cite{Batzner2022}, PaiNN provided efficient equivariant message passing for scalar and tensorial properties \cite{Schtt2021EquivariantMP}, Allegro scaled local equivariant models to over $10^8$ atoms \cite{Musaelian2023}, and MACE achieved top accuracy with higher-order messages \cite{batatia2022mace}. Further variants such as ViSNet, Equi\-formerV2, and SO3krates explore vector–scalar interactions, Trans\-former-style attention, and spherical self-attention to model complex geometry and long-range correlations \cite{Wang2024, liao2024equiformerv2, frank2022so3krates}. 
+
+Practical deployment is supported by frameworks like TorchMD-Net, which integrates MLFFs into standard MD packages \cite{doi:10.1021/acs.jctc.4c00253}, and by tools such as MAPLE and FFAST for automated enzyme and reaction modeling and for diagnosing problematic molecular configurations \cite{D6SC01279E, doi:10.1021/acs.jctc.3c00985}.
+
+\section{Experiments}
+
+\subsection{Dataset and task}
+
+We evaluate on the revised MD17 (rMD17) dataset \cite{christensen2020rmd17}, a standard benchmark of molecular dynamics trajectories where each configuration is labeled with \textit{ab initio} potential energy and atomic forces. In this work we use a single molecule (aspirin) and follow the dataset authors' recommendation to restrict training to at most 1000 structures to avoid overfitting to temporally correlated MD frames. We perform a random split into 1000 training, 200 validation, and 1000 test configurations, and reuse the same split for all models and all hyperparameter settings. The target is to jointly predict energies and forces for each configuration.
+
+\subsection{Architectures}
+
+As baseline we implement SchNet \cite{10.1063/1.5019779} using continuous-filter convolutions and atom-wise energy prediction. Given atomic numbers $Z_i$, positions $\mathbf{r}_i$, and a learned embedding $\mathbf{h}_i^{(0)}$, each interaction block performs
+\begin{align}
+	m_{ij} &= \phi_{\text{msg}}(\mathbf{h}_j)\odot W(r_{ij}), \quad
+	r_{ij} = \lVert \mathbf{r}_i - \mathbf{r}_j\rVert, \\
+	\mathbf{m}_i &= \sum_{j\in\mathcal{N}(i)} m_{ij}, \\
+	\mathbf{h}_i^{\text{new}} &= \mathbf{h}_i + \phi_{\text{upd}}(\mathbf{m}_i),
+\end{align}
+where $W(r_{ij})$ is a distance filter obtained by applying an MLP to a Gaussian radial basis expansion of $r_{ij}$, $\phi_{\text{msg}}$ is a small MLP acting on the embeddings of the current interaction block, and $\phi_{\text{upd}}$ is a small residual MLP. Furthermore, $\phi_{\text{msg}}$ and $\phi_{\text{upd}}$ use \textit{softplus} activation function. Softplus is a smooth, differentiable approximation of the ReLU (Rectified Linear Unit) function:
+\begin{align}
+	\text{Softplus}(x) &= \log\left(1  + e^x\right)
+\end{align}
+After multiple interaction steps, an atom-wise network predicts per-atom energies, which are summed to obtain the total energy $E(\mathbf{R})$.
+
+\paragraph{SchNet+.}
+SchNet+ keeps the same message function $m_{ij}$ but introduces multiple permutation-invariant aggregations over the incoming edge set of each atom:
+\begin{align}
+	\mathbf{m}_i^{\text{sum}} &= \sum_{j} m_{ij}, \quad
+	\mathbf{m}_i^{\text{avg}} = \frac{1}{|\mathcal{N}(i)|}\sum_{j} m_{ij},\\
+	\mathbf{m}_i^{\max} &= \max_{j} m_{ij}, \quad
+	\mathbf{m}_i^{\min} = \min_{j} m_{ij}.
+\end{align}
+Each aggregated message is passed through the \emph{same} update network,
+$\mathbf{h}_i^{k} = \mathbf{h}_i + \phi_{\text{upd}}(\mathbf{m}_i^{k})$ for
+$k\in\{\text{sum},\text{avg},\max,\min\}$, producing four candidate node states.
+These are concatenated and linearly fused,
+\begin{equation}
+	\mathbf{h}_i^{\text{new}} = W_f\,[\mathbf{h}_i^{\text{sum}};\mathbf{h}_i^{\text{avg}};\mathbf{h}_i^{\max};\mathbf{h}_i^{\min}],
+\end{equation}
+so the model can learn how much to trust each “view’’ of the neighborhood while adding only a constant-factor number of parameters.
+
+\paragraph{SchNet++.}
+SchNet++ trades the hand-crafted set of aggregations for a learnable generalized mean. Besides the standard sum aggregation, it computes a log–sum–exp $f$-mean over messages for each feature dimension:
+\begin{equation}
+	(\mathbf{m}_i^{\text{lse}})_d =
+	\frac{1}{\alpha_d}\log\left(\frac{1}{|\mathcal{N}(i)|}\sum_j
+	\exp(\alpha_d (m_{ij})_d)\right),
+\end{equation}
+where $\alpha_d$ is a learned per-feature sharpness parameter. As $\alpha_d\to 0$, this reduces to the arithmetic mean; large positive (negative) values interpolate smoothly towards max (min) pooling. Thisway, the model can still have the different "view"s (average, min, max pooling), while using much less number of parameters for the linear fusion. The two aggregates $\mathbf{m}_i^{\text{sum}}$ and $\mathbf{m}_i^{\text{lse}}$ are each passed through the shared update network and then concatenated and linearly fused:
+\begin{equation}
+	\mathbf{h}_i^{\text{new}} = W_f\,[\mathbf{h}_i^{\text{sum}};\mathbf{h}_i^{\text{lse}}].
+\end{equation}
+Both SchNet+ and SchNet++ preserve permutation invariance over atoms and neighbors, which is an important property required from MLFFs.
+
+\subsection{Training and evaluation}
+
+All models use 4 interaction blocks, hidden dimension $n=128$, and $n_{\text{rbf}}=50$ radial basis functions. Energies and forces are predicted jointly; forces are obtained as
+$\mathbf{F}_i = -\nabla_{\mathbf{r}_i} E(\mathbf{R})$ using automatic differentiation. The loss is a weighted sum of energy and force mean absolute error (MAE),
+\begin{equation}
+	\mathcal{L} = w_E\,\mathrm{MAE}(E,\hat{E}) + w_F\,\mathrm{MAE}(\mathbf{F},\hat{\mathbf{F}}),
+\end{equation}
+with $w_E = 1$ and $w_F = 100$, following common practice to emphasize accurate forces.
+We train with AdamW for 100 epochs and explore a $2\times2$ grid of learning rates
+$\{1\!\times\!10^{-4}, 5\!\times\!10^{-4}\}$ and weight decays $\{10^{-4}, 10^{-2}\}$.
+For each configuration we record training and validation losses, test MAEs, and parameter counts; the best checkpoint is selected by validation loss. The full configuration and code are provided in the appendix to enable replication (see \ref{SourceCode}).
+
+Across all four optimizer settings, SchNet+ and SchNet++ consistently outperform the SchNet baseline on test energy and force MAE. Typical results show force MAE reductions from $\approx 20$--$30$ (SchNet) to $\approx 6$--$10$ (SchNet+ and SchNet++), and energy MAE reductions by one order of magnitude (see \ref{results} for detailed results). Overall, total test loss decreases by roughly $90\%$ relative to SchNet, while parameter counts increase only by factors of $\approx 2\times$ (SchNet+) and $\approx 1.5\times$ (SchNet++) (see \ref{paramnum} for mathematical analysis on number of parameters and their ratios). Learning curves indicate that the proposed models also converge faster in terms of epochs (see \ref{results}).
+
+\section{Discussion}
+
+Our results suggest that the way a GNN aggregates information from neighboring atoms is a crucial lever for improving machine-learned force fields. By enriching SchNet’s sum aggregation with additional permutation-invariant statistics (sum/mean/min/max in SchNet+, and a learnable log–sum–exp mean in SchNet++), we obtain substantially better accuracy and faster convergence for a modest, constant-factor increase in model size. In other words, we improve the \emph{quality} of each message-passing layer rather than simply stacking more layers or widening the network.
+
+From a broader perspective, this study reinforces two insights. First, for data-limited settings such as rMD17, carefully designed inductive biases---here, multi-view neighborhood summaries---can be more effective than brute-force scaling in parameters. Second, generalized $f$-means provide a principled way to interpolate between classical aggregations like mean and max, yielding parameter-efficient gains (SchNet++) that complement the stronger but heavier multi-aggregation scheme (SchNet+). While our evaluation is restricted to a single molecule and a small hyperparameter grid, the consistency of the improvements suggests that aggregation design deserves more attention in future GNN-based MLFF architectures, and motivates follow-up work on extending these ideas to larger and more diverse molecular systems.
+
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{references}
+
+
+%% If your work has an appendix, this is the place to put it.
+\appendix
+
+\section{Training Results (Tables and Figures)}
+\label{results}
+\begin{figure}[H]
+	\centering
+	\includegraphics[width=\linewidth]{figs/lr_0p0001_wd_0p0001_loss_histories.png}
+	\caption{Train/val loss history for the three models on rMD17 aspirin (learning rage = 0.0001, weight decay = 0.0001).}
+	\label{train-val-0001-0001}
+\end{figure}
+
+\begin{figure}[H]
+	\centering
+	\includegraphics[width=\linewidth]{figs/lr_0p0001_wd_0p0001_loss_histories_20.png}
+	\caption{Train/val loss history (first 20 epochs) for the three models on rMD17 aspirin (learning rage = 0.0001, weight decay = 0.0001). Note the faster decrease in train/val loss for SchNet+ and SchNet++.}
+	\label{train-val-0001-0001-first-20}
+\end{figure}
+
+\begin{figure}[H]
+	\centering
+	\includegraphics[width=\linewidth]{figs/lr_0p0001_wd_0p01_loss_histories.png}
+	\caption{Train/val loss history for the three models on rMD17 aspirin (learning rage = 0.0001, weight decay = 0.01).}
+	\label{train-val-0001-01}
+\end{figure}
+
+\begin{figure}[H]
+	\centering
+	\includegraphics[width=\linewidth]{figs/lr_0p0001_wd_0p01_loss_histories_20.png}
+	\caption{Train/val loss history (first 20 epochs) for the three models on rMD17 aspirin (learning rage = 0.0001, weight decay = 0.01). Note the faster decrease in train/val loss for SchNet+ and SchNet++.}
+	\label{train-val-0001-01-first-20}
+\end{figure}
+
+\begin{figure}[H]
+	\centering
+	\includegraphics[width=\linewidth]{figs/lr_0p0005_wd_0p0001_loss_histories.png}
+	\caption{Train/val loss history for the three models on rMD17 aspirin (learning rage = 0.0005, weight decay = 0.0001).}
+	\label{train-val-0005-0001}
+\end{figure}
+
+\begin{figure}[H]
+	\centering
+	\includegraphics[width=\linewidth]{figs/lr_0p0005_wd_0p0001_loss_histories_20.png}
+	\caption{Train/val loss history (first 20 epochs) for the three models on rMD17 aspirin (learning rage = 0.0005, weight decay = 0.0001). Note the faster decrease in train/val loss for SchNet+ and SchNet++.}
+	\label{train-val-0005-0001-first-20}
+\end{figure}
+
+\begin{figure}[H]
+	\centering
+	\includegraphics[width=\linewidth]{figs/lr_0p0005_wd_0p01_loss_histories.png}
+	\caption{Train/val loss history for the three models on rMD17 aspirin (learning rage = 0.0005, weight decay = 0.01).}
+	\label{train-val-0005-01}
+\end{figure}
+
+\begin{figure}[H]
+	\centering
+	\includegraphics[width=\linewidth]{figs/lr_0p0005_wd_0p01_loss_histories_20.png}
+	\caption{Train/val loss history (first 20 epochs) for the three models on rMD17 aspirin (learning rage = 0.0005, weight decay = 0.01). Note the faster decrease in train/val loss for SchNet+ and SchNet++.}
+	\label{train-val-0005-01-first-20}
+\end{figure}
+
+\begin{figure}[H]
+	\centering
+	\includegraphics[width=\linewidth]{figs/lr_0p0001_wd_0p0001_val_force_mae.png}
+	\caption{Force MAE (Mean Absolute Error) on validation dataset during the training epochs of the three models on rMD17 aspirin (learning rage = 0.0001, weight decay = 0.0001).}
+	\label{val-force-mae-0001-0001}
+\end{figure}
+
+\begin{figure}[H]
+	\centering
+	\includegraphics[width=\linewidth]{figs/lr_0p0001_wd_0p01_val_force_mae.png}
+	\caption{Force MAE (Mean Absolute Error) on validation dataset during the training epochs of the three models on rMD17 aspirin (learning rage = 0.0001, weight decay = 0.01).}
+	\label{val-force-mae-0001-01}
+\end{figure}
+
+\begin{figure}[H]
+	\centering
+	\includegraphics[width=\linewidth]{figs/lr_0p0005_wd_0p0001_val_force_mae.png}
+	\caption{Force MAE (Mean Absolute Error) on validation dataset during the training epochs of the three models on rMD17 aspirin (learning rage = 0.0005, weight decay = 0.0001).}
+	\label{val-force-mae-0005-0001}
+\end{figure}
+
+\begin{figure}[H]
+	\centering
+	\includegraphics[width=\linewidth]{figs/lr_0p0005_wd_0p01_val_force_mae.png}
+	\caption{Force MAE (Mean Absolute Error) on validation dataset during the training epochs of the three models on rMD17 aspirin (learning rage = 0.0005, weight decay = 0.01).}
+	\label{val-force-mae-0005-01}
+\end{figure}
+
+\begin{figure}[H]
+	\centering
+	\includegraphics[width=\linewidth]{figs/lr_0p0001_wd_0p0001_test_metrics.png}
+	\caption{Test MAEs comparison for the three models and their parameters count on rMD17 aspirin (learning rage = 0.0001, weight decay = 0.0001).}
+	\label{test-mae-0001-0001}
+\end{figure}
+
+\begin{figure}[H]
+	\centering
+	\includegraphics[width=\linewidth]{figs/lr_0p0001_wd_0p01_test_metrics.png}
+	\caption{Test MAEs comparison for the three models and their parameters count on rMD17 aspirin (learning rage = 0.0001, weight decay = 0.01).}
+	\label{test-mae-0001-01}
+\end{figure}
+
+\begin{figure}[H]
+	\centering
+	\includegraphics[width=\linewidth]{figs/lr_0p0005_wd_0p0001_test_metrics.png}
+	\caption{Test MAEs comparison for the three models and their parameters count on rMD17 aspirin (learning rage = 0.0005, weight decay = 0.0001).}
+	\label{test-mae-0005-0001}
+\end{figure}
+
+\begin{figure}[H]
+	\centering
+	\includegraphics[width=\linewidth]{figs/cross_config_test_loss.png}
+	\caption{Cross configuration total test loss for the three models.}
+	\label{cross-test}
+\end{figure}
+
+\begin{figure}[H]
+	\centering
+	\includegraphics[width=\linewidth]{figs/cross_config_test_force_mae.png}
+	\caption{Cross configuration forces test loss for the three models.}
+	\label{cross-test-force}
+\end{figure}
+
+\begin{figure}[H]
+	\centering
+	\includegraphics[width=\linewidth]{figs/cross_config_test_energy_mae.png}
+	\caption{Cross configuration Energy test loss for the three models.}
+	\label{cross-test-E}
+\end{figure}
+
+We further define an efficiency score which evaluates how much the test loss of the model has decreased with respect to the increase in the number of parameters (having SchNet as baseline). The efficiency score is defined as follows:
+
+\begin{equation}
+	efscore(m) = \frac{\frac{TL(SchNet) - TL(m)}{TL(SchNet)}}{\frac{P(m)-P(SchNet)}{P(SchNet)}}
+\end{equation}
+ 
+Where $TL(m)$ is the Total Test Loss, and $P(m)$ is the number of parameters for model $m$. This metric calculates the ratio of decrease in loss with respect to the ratio of increase in the number of parameters. Any number higher than 1 suggests that the model was able to decrease the loss more than it increased the number of parameters compared to the baseline model.
+
+\begin{table}[H]
+	\caption{Efficiency Score for SchNet+ and SchNet++ (Averaged over Configurations)}
+	\label{fscoretab}
+	\begin{tabular}{ccl}
+		\toprule
+		SchNet+&SchNet++&Metric\\
+		\midrule
+		0.89&0.84&Relative Total Error Improvement\\
+		0.82&0.41&Relative Parameter Increase\\
+		1.09&2.05&Efficiency Score\\
+		\bottomrule
+	\end{tabular}
+\end{table}
+
+As shown by the table, SchNet+ and SchNet++ both remarkably improve the total loss. However, SchNet++ uses much less number of parameters as SchNet+ while achieving roughly the same loss over the test dataset.
+
+\section{Number of Parameters}
+\label{paramnum}
+In this section, we do a mathematical analysis on the number of parameters of SchNet, SchNet+, SchNet++. Then, we will show that as our machine learning models grow, their sizes become proportional to each other, meaning the proportion of SchNet+ and SchNet++'s size to SchNet is $O(1)$.
+
+\subsection{SchNet Parameters}
+The general workflow for calculating the number of parameters is as follows:
+\begin{equation}
+	\begin{split}
+		P\left(\text{SchNet}\right) = m\times\left(P\left(\text{Interaction Layer}\right) + P\left(\text{Update}\right)\right) \\ + P\left(\text{Atomic Embedding}\right) + P\left(\text{Energy Head}\right)
+	\end{split}
+\end{equation}
+Furthermore, we assume that the number of hidden features $(n)$ is constant over the interaction layers $(m)$. Therefore, the number of parameters for SchNet would be:
+
+\begin{equation}
+	\begin{split}
+		m\times\left(\left[n_{rbf}\times n + \left(n^2 + n\right) + \left(n^2 + n\right)\right] + \left[n^2 + n + n^2 + n\right]\right) \\ + \left[118\times n\right] + \left[n^2 + n + n + 1\right]
+	\end{split}
+\end{equation}
+
+$n_{rbf}$ is the number of radial basis functions. Each layer transforms the pairwise distance matrix to vectors with same size as hidden features using a simple 2 layered MLP. Also, each atom embedding (or hidden embedding) is transformed to another vector with the same size using another single layer MLP. Initially, each atom has an embedding of size $n$, resulting into a matrix of initial learnable embeddings for each atomic number (hence the term $118\times n$). Lastly, the Energy Head is another 2 layer MLP getting vectors of size $n$ as input and giving one scalar as output.
+
+\subsection{SchNet+ and SchNet++}
+The general workflow for calculating the number of parameters for SchNet+ is as follows:
+\begin{equation}
+	\begin{split}
+		P\left(\text{SchNet+}\right) = m\times\left(P\left(\text{Interaction Layer}\right) + P\left(\text{Update}\right) + P\left(\text{Fuse}\right)\right) \\ + P\left(\text{Atomic Embedding}\right) + P\left(\text{Energy Head}\right)
+	\end{split}
+\end{equation}
+
+In addition to the previous structure, each interaction layer now has an additional fuse MLP which integrates the different embeddings proposed by different aggregations. Hence, the number of parameters for SchNet+ would be:
+
+\begin{equation}
+	\begin{split}
+		m\Big(
+		[n_{rbf} \times n + (n^2 + n) + (n^2 + n)]
+		+ [n^2 + n + n^2 + n] \\
+		+ [4n^2 + n]
+		\Big)
+		\\ + [118 \times n] + [n^2 + n + n + 1]
+	\end{split}
+\end{equation}
+
+Similarly, for SchNet++ we would have:
+
+\begin{equation}
+	\begin{split}
+		P(\text{SchNet++}) ={}&\;
+		m\Big(
+		P(\text{Interaction Layer})
+		+ P(\text{Update}) \\
+		&\quad
+		+ P(\text{Fuse})
+		+ P(\text{f-mean})
+		\Big) \\
+		&\quad
+		+ P(\text{Atomic Embedding})
+		+ P(\text{Energy Head})
+	\end{split}
+\end{equation}
+
+The only thing, additional to SchNet+ is the $\alpha_d$ factor inside the log-sum-exp function which adds $n$ learnable parameters to each layer.
+
+Thus:
+
+\begin{equation}
+	\begin{split}
+		m\Big(
+		[n_{rbf} \times n + (n^2 + n) + (n^2 + n)]
+		+ [n^2 + n + n^2 + n] \\ 
+		+ [2n^2 + n] + n
+		\Big)
+		\\ + [118 \times n] + [n^2 + n + n + 1]
+	\end{split}
+\end{equation}
+\subsection{Comparison}
+The total number of parameters for each architecture can be summarized as follows:
+
+\begin{equation}
+	\text{SchNet}(n,m) = \left(4m+1\right)n^2 + \left(5m + m\times n_{rbf} + 120\right)n + 1
+\end{equation}
+
+\begin{equation}
+	\text{SchNet+}(n,m) = \left(8m+1\right)n^2 + \left(6m + m\times n_{rbf} + 120\right)n + 1 \\
+\end{equation}
+
+\begin{equation}
+	\text{SchNet++}(n,m) = \left(6m+1\right)n^2 + \left(7m + m\times n_{rbf} + 120\right)n + 1
+\end{equation}
+
+The proportion between parameters of SchNet+ and SchNet is:
+
+\begin{equation}
+	\begin{split}
+	 \lim_{m,n\rightarrow \infty} \frac{\text{SchNet+}(n, m)}{\text{SchNet}(n,m)} = \frac{\left(8m+1\right)n^2 + \left(6m + m\times n_{rbf} + 120\right)n + 1}{\left(4m+1\right)n^2 + \left(5m + m\times n_{rbf} + 120\right)n + 1} \\ = \frac{8mn^2}{4mn^2} = 2
+	\end{split}
+\end{equation}
+
+Moreover, the proportion between parameters of SchNet++ and SchNet is:
+
+\begin{equation}
+	\begin{split}
+		\lim_{m,n\rightarrow \infty} \frac{\text{SchNet++}(n, m)}{\text{SchNet}(n,m)} = \frac{\left(6m+1\right)n^2 + \left(7m + m\times n_{rbf} + 120\right)n + 1}{\left(4m+1\right)n^2 + \left(5m + m\times n_{rbf} + 120\right)n + 1} \\ = \frac{6mn^2}{4mn^2} = 1.5
+	\end{split}
+\end{equation}
+
+Note that, each SchNet model can be extended to SchNet+ or SchNet++, and as our SchNet grows, the extended SchNet+ and SchNet++ also grow but the size of their parameters grow with a factor of 2-1.5 (respectively). 
+%% End of template.
+
+\section{Source Code}
+\label{SourceCode}
+Source code for this project is available at:
+\\
+\hyperlink{https://github.com/Amirarsalan-sn/SchNetPlus}{https://github.com/Amirarsalan-sn/SchNetPlus}
+
+\section{Acknowledgment}
+We acknowledge the collaborative usage of AI in the processes of project development and writing the report.
+\end{document}
+\endinput

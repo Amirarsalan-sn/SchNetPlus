@@ -44,6 +44,22 @@ def plot_histories_per_config(config_name, histories):
     plt.savefig(os.path.join(OUT_DIR, f"{config_name}_loss_histories.png"), dpi=200)
     plt.close()
 
+    # first 20 epochs
+
+    plt.figure(figsize=(10, 6))
+    for hist in histories:
+        dft = curve_df(hist, "train")
+        dfv = curve_df(hist, "val")
+        plt.plot(dft["epoch"][0:20], dft["loss"][0:20], label=f"{hist['model']} train")
+        plt.plot(dfv["epoch"][0:20], dfv["loss"][0:20], linestyle="--", label=f"{hist['model']} val")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title(f"Train/val loss histories (first 20) - {config_name}")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUT_DIR, f"{config_name}_loss_histories_20.png"), dpi=200)
+    plt.close()
+
     plt.figure(figsize=(10, 6))
     for hist in histories:
         dfv = curve_df(hist, "val")

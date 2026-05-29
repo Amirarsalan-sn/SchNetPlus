@@ -1,0 +1,22 @@
+{
+  "lr_0p0001_wd_0p0001": [
+    "schnet",
+    "schnet_plus",
+    "schnet_plusplus"
+  ],
+  "lr_0p0001_wd_0p01": [
+    "schnet",
+    "schnet_plus",
+    "schnet_plusplus"
+  ],
+  "lr_0p0005_wd_0p0001": [
+    "schnet",
+    "schnet_plus",
+    "schnet_plusplus"
+  ],
+  "lr_0p0005_wd_0p01": [
+    "schnet",
+    "schnet_plus",
+    "schnet_plusplus"
+  ]
+}
