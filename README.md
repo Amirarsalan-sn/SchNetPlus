@@ -206,4 +206,4 @@ So both extensions increase model size only by a **constant factor**, not by a q
 
 ## Report
 
-I strongly suggest you to read the [report](/report/dl-report.pdf) for detailed theoritical explanations of the model, mathematical analysis, and training results. Moreover, there is a [presentation](/report/presentation.pdf) in which the architecture of SchNet/Schnet+/Schnet++ are visualized.
+I strongly suggest you to read the [report](/report/dl-report.pdf) for detailed theoritical explanations of the model, mathematical analysis, and training results. Moreover, there is a [presentation](/report/presentation.pdf) in which the architectures of SchNet/Schnet+/Schnet++ are visualized.
